@@ -7,15 +7,40 @@ from .positionals import Direction, Position
 from .common import read_input
 import logging
 import random
+import heapq
+
+
+class PriorityQueue:
+
+    def __init__(self):
+        self.elements = []
+
+    def empty(self):
+        return len(self.elements) == 0
+
+    def put(self, item, priority):
+        heapq.heappush(self.elements, (priority, item))
+
+    def get(self):
+        return heapq.heappop(self.elements)[1]
 
 
 class MapCell:
     """A cell on the game map."""
+
     def __init__(self, position, halite_amount):
         self.position = position
         self.halite_amount = halite_amount
         self.ship = None
         self.structure = None
+        self._cost = halite_amount / constants.MOVE_COST_RATIO
+
+    def update_cost(self):
+        self._cost = self.halite_amount / constants.MOVE_COST_RATIO        
+
+    @property
+    def cost(self):
+        return self._cost
 
     @property
     def is_empty(self):
@@ -70,10 +95,13 @@ class GameMap:
     Can be indexed by a position, or by a contained entity.
     Coordinates start at 0. Coordinates are normalized for you
     """
+
     def __init__(self, cells, width, height):
         self.width = width
         self.height = height
         self._cells = cells
+        self._average = None
+        self._total = None
 
     def __getitem__(self, location):
         """
@@ -87,6 +115,21 @@ class GameMap:
         elif isinstance(location, Entity):
             return self._cells[location.position.y][location.position.x]
         return None
+
+    @property
+    def total_halite(self):
+        if not self._total:
+            tot = 0
+            for col in self._cells:
+                tot += sum(c.halite_amount for c in col)
+            self._total = tot
+        return self._total
+
+    @property
+    def average_halite(self):
+        if not self._average:
+            self._average = self.total_halite / (self.width * self.height)
+        return self._average
 
     def calculate_distance(self, source, target):
         """
@@ -138,7 +181,8 @@ class GameMap:
         destination = self.normalize(destination)
         possible_moves = []
         distance = abs(destination - source)
-        y_cardinality, x_cardinality = self._get_target_direction(source, destination)
+        y_cardinality, x_cardinality = self._get_target_direction(
+            source, destination)
 
         if distance.x != 0:
             possible_moves.append(x_cardinality if distance.x < (self.width / 2)
@@ -148,7 +192,7 @@ class GameMap:
                                   else Direction.invert(y_cardinality))
         return possible_moves
 
-    def naive_navigate(self, ship, destination, me, excluded_direction=None):
+    def naive_navigate(self, ship, destination, excluded_direction=None):
         """
         Returns a singular safe move towards the destination.
 
@@ -165,7 +209,8 @@ class GameMap:
                 continue
             target_pos = ship.position.directional_offset(direction)
             if not self[target_pos].is_occupied:
-                cost = self[target_pos].halite_amount / constants.MOVE_COST_RATIO
+                cost = self[target_pos].halite_amount / \
+                    constants.MOVE_COST_RATIO
                 if lowest_cost is None or cost < lowest_cost:
                     lowest_cost = cost
                     best_direction = direction
@@ -177,17 +222,20 @@ class GameMap:
                 self[target_pos].mark_unsafe(ship)
                 return direction
 
-        # Cant move in a good direction, let's see if we can move in any direction
+        # Cant move in a good direction, let's see if we can move in any
+        # direction
         lowest_cost = None
         best_direction = None
-        all_directions = [Direction.North, Direction.East, Direction.South, Direction.West]
+        all_directions = [Direction.North, Direction.East,
+                          Direction.South, Direction.West]
         random.shuffle(all_directions)
         for direction in all_directions:
             target_pos = ship.position.directional_offset(direction)
             if excluded_direction and excluded_direction == direction:
                 continue
             if not self[target_pos].is_occupied:
-                cost = self[target_pos].halite_amount / constants.MOVE_COST_RATIO
+                cost = self[target_pos].halite_amount / \
+                    constants.MOVE_COST_RATIO
                 if lowest_cost is None or cost < lowest_cost:
                     lowest_cost = cost
                     best_direction = direction
@@ -211,6 +259,70 @@ class GameMap:
         # logging.info("We can't move, ordering to stay still... {}".format(ship))
         return Direction.Still
 
+    def heuristic(self, a, b):
+        (x1, y1) = a.x, a.y
+        (x2, y2) = b.x, b.y
+
+        return abs(x1 - x2) + abs(y1 - y2)
+
+    def a_star_navigate(self, ship, goal, blocked_position=None):
+        start = ship.position
+        
+        if blocked_position:
+            exclude_dir = ship.position.directional(blocked_position)
+        else:
+            exclude_dir = None
+
+        # if self.calculate_distance(start, goal) > 5:
+        #     # Too far away to calc with this
+        #     return self.naive_navigate(ship, goal, exclude_dir)
+
+        frontier = PriorityQueue()
+        frontier.put(start, 0)
+        came_from = {}
+        cost_so_far = {}
+        came_from[start] = None
+        cost_so_far[start] = 0
+
+        while not frontier.empty():
+            current = frontier.get()
+
+            if current == goal:
+                path = []
+                while current != start:
+                    path.append(current)
+                    current = came_from[current]
+                path.append(start)
+                path.reverse()
+                if len(path) > 1:
+                    self[path[1]].mark_unsafe(ship)
+
+                    return ship.position.directional(path[1])
+                else:
+                    return Direction.Still
+
+            for next in self[current].position.neighbors():
+                if blocked_position and next == blocked_position:
+                    continue
+                # if game_map[next].is_occupied:
+                # if next in intended_moves:
+                #     continue
+                if self[next].ship is not None:
+                    # logging.info("Ship detected: {}".format(self[next].ship.id))
+                    if ship != self[next].ship:
+                        continue
+
+                new_cost = cost_so_far[current] + self[next].cost
+                if next not in cost_so_far or new_cost < cost_so_far[next]:
+                    cost_so_far[next] = new_cost
+                    priority = new_cost + self.calculate_distance(goal, next)
+                    frontier.put(next, priority)
+                    came_from[next] = current
+
+        # Could not find a path, fallback to naive_navigate
+        # logging.warning("AStar navigate failed, falling back to naive_navigate")
+        return self.naive_navigate(ship, goal, exclude_dir)
+
     @staticmethod
     def _generate():
         """
@@ -218,7 +330,8 @@ class GameMap:
         :return: The map object
         """
         map_width, map_height = map(int, read_input().split())
-        game_map = [[None for _ in range(map_width)] for _ in range(map_height)]
+        game_map = [[None for _ in range(map_width)]
+                    for _ in range(map_height)]
         for y_position in range(map_height):
             cells = read_input().split()
             for x_position in range(map_width):
@@ -231,12 +344,18 @@ class GameMap:
         Updates this map object from the input given by the game engine
         :return: nothing
         """
+        self._average = None
         # Mark cells as safe for navigation (will re-mark unsafe cells
         # later)
         for y in range(self.height):
             for x in range(self.width):
                 self[Position(x, y)].ship = None
-
+        diff = 0
         for _ in range(int(read_input())):
             cell_x, cell_y, cell_energy = map(int, read_input().split())
-            self[Position(cell_x, cell_y)].halite_amount = cell_energy
+            cell = self[Position(cell_x, cell_y)]
+            diff += cell.halite_amount - cell_energy
+            cell.halite_amount = cell_energy
+            cell.update_cost()
+        if diff > 0:
+            self._total -= diff

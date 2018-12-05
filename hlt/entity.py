@@ -66,7 +66,7 @@ class Ship(Entity):
     @property
     def is_full_enough(self):
         """Is this ship at 90% or more halite capacity?"""
-        return self.halite_amount >= constants.MAX_HALITE * 0.9
+        return self.halite_amount >= constants.MAX_HALITE * 0.98
 
     def make_dropoff(self):
         """Return a move to transform this ship into a dropoff."""

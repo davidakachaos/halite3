@@ -65,6 +65,7 @@ class Position:
     def __init__(self, x, y):
         self.x = x
         self.y = y
+        self._neighbors = None
 
     def directional_offset(self, direction):
         """
@@ -74,11 +75,25 @@ class Position:
         """
         return self + Position(*direction)
 
-    def get_surrounding_cardinals(self):
+    def directional(self, position):
+        """
+        Returns the direction of a neighbor considering a Position
+        :param position: the position to check
+        :return: a direction if found else None
+        """
+        if position not in self.neighbors():
+            return None
+        for current_direction in Direction.get_all_cardinals():
+            if self.directional_offset(current_direction) == position:
+                return current_direction
+
+    def neighbors(self):
         """
         :return: Returns a list of all positions around this specific position in each cardinal direction
         """
-        return [self.directional_offset(current_direction) for current_direction in Direction.get_all_cardinals()]
+        if self._neighbors is None:
+            self._neighbors = [self.directional_offset(current_direction) for current_direction in Direction.get_all_cardinals()]
+        return self._neighbors
 
     def __add__(self, other):
         return Position(self.x + other.x, self.y + other.y)
@@ -104,6 +119,9 @@ class Position:
 
     def __ne__(self, other):
         return not self.__eq__(other)
+
+    def __lt__(self, other):
+        return self.x < other.x or self.y < other.y
 
     def __hash__(self):
         return hash("{}|{}".format(self.x, self.y))

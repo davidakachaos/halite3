@@ -4,6 +4,8 @@
 # Import the Halite SDK, which will let you interact with the game.
 import hlt
 
+import heapq
+
 # This library contains constant values.
 from hlt import constants
 
@@ -36,6 +38,10 @@ game.ready("AlternativeChaosBot")
 
 
 def determin_target(ship):
+    if ship_info[ship.id]["state"] == "returning":
+        ship_info[ship.id]["target_position"] = closest_dropoff(ship)
+        return
+
     center_pos = ship.position
     target = None
     # Choose the closest most valueable
@@ -67,7 +73,15 @@ def determin_target(ship):
 
 
 def fill_intended_moves():
-    # intended_moves = {}
+    # Remove all own ships
+    own_ships = me.get_ships()
+    for y in range(game_map.height):
+            for x in range(game_map.width):
+                test_ship = game_map[Position(x, y)].ship
+                if test_ship and test_ship in own_ships:
+                    game_map[Position(x, y)].ship = None
+    
+    intended_moves = {}
     for ship in me.get_ships():
         if ship.id not in ship_info.keys():
             continue
@@ -76,13 +90,33 @@ def fill_intended_moves():
         if ship.position in ship_targets:
             ship_targets.remove(ship.position)
 
+        if ship_info[ship.id]["target_position"] and ship_info[ship.id]["target_position"] == ship.position:
+            if ship_info[ship.id]["state"] == "exploring":
+                logging.info("Ship reached target, collecting")
+                ship_info[ship.id]["state"] = "collecting"
+            elif ship_info[ship.id]["state"] == "returning":
+                ship_info[ship.id]["state"] = "exploring"
+                ship_info[ship.id]["target_position"] = None
+                logging.info("Ship returned? -> {}".format(ship.halite_amount))
+
         if game_map[ship.position].has_structure and ship.halite_amount == 0:
             ship_info[ship.id]["state"] = "exploring"
+
+        moving_costs = game_map[ship.position].halite_amount / constants.MOVE_COST_RATIO
+        if ship.halite_amount < moving_costs:
+            logging.warning("Can't move ship! It would cost {} and we have {}".format(moving_costs, ship.halite_amount))
+            # Can't move even if we wanted to!!
+            ship_info[ship.id]["state"] = "collecting"
+
         if ship_info[ship.id]['state'] == "collecting":
-            if ship.position not in intended_moves:
-                intended_moves[ship.position] = {"ships": []}
-            intended_moves[ship.position]["ships"].append(ship)
-            continue
+            if game_map[ship.position].halite_amount <= 80 or moving_costs < ship.halite_amount * 0.05:
+                ship_info[ship.id]["state"] = "exploring"
+            else:
+                if ship.position not in intended_moves:
+                    intended_moves[ship.position] = {"ships": []}
+                intended_moves[ship.position]["ships"].append(ship)
+                continue
+
         if ship_info[ship.id]["target_position"] is None:
             determin_target(ship)
         if ship.position == ship_info[ship.id]["target_position"]:
@@ -91,118 +125,186 @@ def fill_intended_moves():
             ship_info[ship.id]["state"] = "collecting"
             intended_moves[ship.position]["ships"].append(ship)
             continue
-        direction = game_map.get_unsafe_moves(
-            ship.position, ship_info[ship.id]['target_position'])[0]
-        position = ship.position.directional_offset(direction)
+
+        logging.info("Start: {} Goal: {}".format(ship.position, ship_info[ship.id]['target_position']))
+        path = a_star_search(ship, ship_info[ship.id]['target_position'])
+        logging.info("Path: {}".format(path))
+        # logging.info("costs keys only: {}".format(costs.keys()))
+        if path is None:
+            logging.info("There is no path to goal!")
+            position = ship.position
+        else:
+            position = path[1]
+            logging.info("Next move: {}".format(position))
+
+        # direction = game_map.get_unsafe_moves(
+        #     ship.position, ship_info[ship.id]['target_position'])[0]
+        # position = ship.position.directional_offset(direction)
         # logging.info()
         if position not in intended_moves:
             intended_moves[position] = {"ships": []}
         intended_moves[position]["ships"].append(ship)
+    return intended_moves
 
 
 def ship_is_mine(ship):
     return ship in me.get_ships()
 
 
-def resolve_intended_moves():
+def resolve_intended_moves(moves):
     # Execute each intended_move
-    for key in intended_moves:
-        data = intended_moves[key]
+    for key in moves:
+        data = moves[key]
         ship = data["ships"][0]
-        target = ship_info[ship.id]['target_position']
+        target = key
+        direction = ship.position.directional(target)
+        target_position = key
 
-        if ship_info[ship.id]['target_position'] == ship.position:
-            ship_info[ship.id]["state"] = "collecting"
+        logging.info("Ship {} is {}".format(ship.id, ship_info[ship.id]["state"]))
+
+        if target_position == ship.position:
+            logging.info("Ship info: {}".format(ship_info[ship.id]))
+            logging.info("Ship staying still")
+            command_queue.append(ship.stay_still())
+            continue
+
+        if ship_info[ship.id]["state"] == "returning":
+            logging.info(ship_info[ship.id])
+            logging.info("Shipyard pos: {}".format(me.shipyard.position))
 
         if ship_info[ship.id]["state"] == "collecting":
-            logging.info("Ship collecting at {}".format(ship.position))
+            logging.info("{} collecting at {}".format(ship, ship.position))
             command_queue.append(ship.stay_still())
         else:
-            logging.info("Moving {} to {}".format(ship, target))
-            direction = game_map.get_unsafe_moves(ship.position, target)[0]
-            command_queue.append(ship.move(direction))
-    logging.info("Executed moves, resetting.")
-    intended_moves = {}
+            if game_map[ship.position].cost <= ship.halite_amount:
+                logging.info("Moving {} to {}".format(ship, target_position))
+                if direction is None:
+                    logging.info("No direction set!")
+                    direction = game_map.get_unsafe_moves(ship.position, target_position)[0]
+                command_queue.append(ship.move(direction))
+            else:
+                logging.info("Can't move ship! -> {} > {}".format(game_map[ship.position].cost, ship.halite_amount))
+                command_queue.append(ship.stay_still())
+
+    logging.info("Executed moves.")
 
 
-def check_intended_moves(intended_moves):
+def check_intended_moves(moves):
+    logging.debug("Moves: {}".format(moves))
     new_intended_moves = {}
     positions_done = []
     needs_recheck = False
 
-    for position in intended_moves:
-        data = intended_moves[position]
+    for position in moves:
+        data = moves[position]
         # logging.info("Position: {} Data: {}".format(position, data))
         if len(data["ships"]) > 1:
             logging.info(
                 "More ships want to go to the same space!! -> {}".format(position))
             # Two or more ships want to go to the same place!
             prio_ship = None
+            returning = None
             most_halite = 0
             for ship in data["ships"]:
-                if ship_info[ship.id]["state"] == "collecting":
+                if ship_info[ship.id]["state"] == "collecting" and ship.position == position:
                     prio_ship = ship
                     break
-                if ship.halite_amount > most_halite:
+                if ship_info[ship.id]["state"] == "returning":
+                    returning = ship
+                    if prio_ship is None or returning.halite_amount < ship.halite_amount:
+                        prio_ship = ship
+                        returning = ship
+                elif returning is None and ship.halite_amount > most_halite:
                     prio_ship = ship
                     most_halite = ship.halite_amount
             logging.info("Priority ship: {}".format(prio_ship))
+
             if position not in new_intended_moves:
                 new_intended_moves[position] = {"ships": []}
-            new_intended_moves[position]["ships"].append(prio_ship)
+            if prio_ship not in new_intended_moves[position]["ships"]: 
+                new_intended_moves[position]["ships"].append(prio_ship)
+                game_map[position].ship = prio_ship
 
             logging.info("Checking other ships...")
             for ship in data["ships"]:
                 if ship == prio_ship:
                     continue
-                logging.info("Checking {}".format(ship))
+                logging.info("Checking {}".format(ship.id))
+                if ship_info[ship.id]["state"] == "collecting" and ship.position != position:
+                    logging.info("Collecting, staying at {}".format(ship.position))
+                    if ship.position not in new_intended_moves:
+                        new_intended_moves[ship.position] = {"ships": []}
+
+                    if ship not in new_intended_moves[ship.position]["ships"]:
+                        new_intended_moves[ship.position]["ships"].append(ship)
+                    continue
+
                 if ship_info[ship.id]["target_position"] == position:
                     # Can't move to this target, elect new one
-                    logging.info("Electing new target...")
+                    logging.info("Old target: {}".format(ship_info[ship.id]["target_position"]))
                     determin_target(ship)
+                    logging.info("New target: {}".format(ship_info[ship.id]["target_position"]))
 
                 # Need an alternative route!
-                direction = game_map.naive_navigate(
-                    ship, ship_info[ship.id]["target_position"], me)
-                target_position = ship.position.directional_offset(direction)
+                # direction = game_map.naive_navigate(
+                #     ship, ship_info[ship.id]["target_position"], me)
+                # target_position = ship.position.directional_offset(direction)
+                path = a_star_search(ship, ship_info[ship.id]['target_position'])
+                logging.info("Path: {}".format(path))
+                # logging.info("costs keys only: {}".format(costs.keys()))
+                if path is None:
+                    logging.info("Want {} -> {}".format(ship.position, ship_info[ship.id]['target_position']))
+                    logging.info("There is no path to goal!")
+                    target_position = ship.position
+                else:
+                    target_position = path[1]
+                    logging.info("Next move: {}".format(target_position))
 
                 if target_position not in new_intended_moves:
                     new_intended_moves[target_position] = {"ships": []}
-                new_intended_moves[target_position]["ships"].append(prio_ship)
 
-                # if target_position in intended_moves and target_position not in positions_done:
-                #     intended_moves[target_position]["ships"].append(ship)
-                #     continue
-                # if target_position in intended_moves and target_position in positions_done:
-                #     logging.error("Cant move ship!!!")
-                #     command_queue.append(ship.stay_still())
-                #     continue
-
-                # if target_position == position:
-                #     logging.error("Still want to move to the same spot!!!")
-                #     command_queue.append(ship.stay_still())
-                # else:
-                #     logging.info("Moving ship to {}".format(target_position))
-                #     command_queue.append(ship.move(direction))
+                if ship not in new_intended_moves[target_position]["ships"]:
+                    new_intended_moves[target_position]["ships"].append(ship)
         else:
             # Move ship to that pos
             ship = data["ships"][0]
             target = ship_info[ship.id]['target_position']
+            target_position = None
+            if target == ship.position:
+                target_position = ship.position
+            else:
+                path = a_star_search(ship, target)
+                if path is None:
+                    logging.info("No path to target")
+                    target_postition = ship.position
+                else:
+                    target_position = path[1]
+                # direction = game_map.naive_navigate(ship, target, me)
+                # target_position = ship.position.directional_offset(direction)
+                if target_position is None:
+                    target_position = ship.position
+                logging.info("Target position: {}".format(target_position))
 
-            if position not in new_intended_moves:
-                new_intended_moves[position] = {"ships": []}
-            intended_moves[position]["ships"].append(ship)
+            if target_position not in new_intended_moves:
+                new_intended_moves[target_position] = {"ships": []}
+            if ship not in new_intended_moves[target_position]["ships"]:
+                new_intended_moves[target_position]["ships"].append(ship)
+                logging.info("Setting ship in game_map -> {} -> {}".format(target_position, ship))
+                game_map[target_position].ship = ship
             continue
 
         # Check next position
         positions_done.append(position)
     # Now keep checking until moves have been resolved
+    for key in new_intended_moves:
+        if len(new_intended_moves[key]["ships"]) > 1:
+            needs_recheck = True
+            break
+
     if needs_recheck:
-        check_intended_moves(new_intended_moves)
+        return check_intended_moves(new_intended_moves)
     else:
         return new_intended_moves
-
-
 
 
 def determin_high_halite_cells():
@@ -303,6 +405,20 @@ def create_drop():
         del ship_info[best_ship.id]
 
 
+def closest_dropoff(ship):
+    dist_to_shipyard = game_map.calculate_distance(
+        ship.position, me.shipyard.position)
+    closest_drop = 0
+    closest_drop_off = None
+    dist_to_drop_off = game_map.height
+    for drop in me.get_dropoffs():
+        if game_map.calculate_distance(ship.position, drop.position) < dist_to_drop_off:
+            dist_to_drop_off = game_map.calculate_distance(
+                ship.position, drop.position)
+            closest_drop_off = drop.position
+
+    return me.shipyard.position if dist_to_shipyard < dist_to_drop_off else closest_drop_off
+
 def check_for_dropoff(ship):
     dist_to_shipyard = game_map.calculate_distance(
         ship.position, me.shipyard.position)
@@ -336,6 +452,65 @@ def check_for_dropoff(ship):
         ship_info[ship.id]["target_position"] = closest_drop_off
         ship_info[ship.id]["state"] = "returning"
 
+
+def heuristic(a, b):
+    (x1, y1) = a.x, a.y
+    (x2, y2) = b.x, b.y
+
+    return abs(x1 - x2) + abs(y1 - y2) * 1.01
+
+def a_star_search(ship, goal):
+    frontier = PriorityQueue()
+    start = ship.position
+    frontier.put(start, 0)
+    came_from = {}
+    cost_so_far = {}
+    came_from[start] = None
+    cost_so_far[start] = 0
+    
+    while not frontier.empty():
+        current = frontier.get()
+        
+        if current == goal:
+            path = []
+            while current != start:
+                path.append(current)
+                current = came_from[current]
+            path.append(start)
+            path.reverse()
+            return path
+        
+        for next in game_map[current].position.neighbors():
+            # if game_map[next].is_occupied:
+            # if next in intended_moves:
+            #     continue
+            if game_map[next].ship is not None:
+                logging.info("Ship detected: {}".format(game_map[next].ship))
+                if ship != game_map[next].ship:
+                    continue
+            new_cost = cost_so_far[current] + game_map[next].cost
+            if next not in cost_so_far or new_cost < cost_so_far[next]:
+                cost_so_far[next] = new_cost
+                priority = new_cost + heuristic(goal, next)
+                frontier.put(next, priority)
+                came_from[next] = current
+    
+    # return came_from, cost_so_far
+
+
+class PriorityQueue:
+    def __init__(self):
+        self.elements = []
+    
+    def empty(self):
+        return len(self.elements) == 0
+    
+    def put(self, item, priority):
+        heapq.heappush(self.elements, (priority, item))
+    
+    def get(self):
+        return heapq.heappop(self.elements)[1]
+
 while True:
     # This loop handles each turn of the game. The game object changes every turn, and you refresh that state by
     #   running update_frame().
@@ -350,8 +525,7 @@ while True:
     determin_high_halite_cells()
     check_ship_info()
     create_drop()
-    fill_intended_moves()
-    check_intended_moves()
+    resolve_intended_moves(check_intended_moves(fill_intended_moves()))
     # logging.info("Resolved moves, resetting intended_moves")
     # intended_moves = {}
 
@@ -359,7 +533,7 @@ while True:
     if game.turn_number <= 200:
         if me.halite_amount >= constants.SHIP_COST and not game_map[me.shipyard].is_occupied:
             command_queue.append(me.shipyard.spawn())
-            # logging.info("Spawning new ship!")
+            logging.info("Spawning new ship!")
 
     # Send your moves back to the game environment, ending this turn.
     game.end_turn(command_queue)
