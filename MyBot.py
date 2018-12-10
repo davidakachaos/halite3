@@ -7,6 +7,7 @@ import time
 
 # This library contains constant values.
 from hlt import constants
+import numpy as np
 
 # This library contains direction metadata to better interface with the game.
 from hlt.positionals import Direction, Position
@@ -70,6 +71,8 @@ game_map = game.game_map
 # will start.
 game.ready("ChaosBot")
 
+cache_drop_offs = {}
+
 
 def determin_sniper():
     if disable_sniping:
@@ -124,8 +127,7 @@ def determin_sniper():
 
 
 def move_sniper(ship):
-    moving_costs = game_map[
-        ship.position].halite_amount / constants.MOVE_COST_RATIO
+    moving_costs = game_map[ship.position].cost
 
     if ship.halite_amount < moving_costs:
         logging.warning("Can't move sniper! It would cost {} and we have {}".format(
@@ -175,35 +177,38 @@ def unmark_area_unsafe(position):
         game_map[pos].ship = None
 
 
-def distance_to_closest_drop(ship):
-    closest_drop = 0
-    dist_to_drop_off = game_map.height
-    for drop in drop_off_points:
-        if game_map.calculate_distance(ship.position, drop) < dist_to_drop_off:
-            dist_to_drop_off = game_map.calculate_distance(
-                ship.position, drop)
+# def closest_dropoff_point(ship):
+#     closest_drop = 0
+#     dist_to_drop_off = game_map.height
+#     for drop in drop_off_points:
+#         distance = game_map.calculate_distance(ship.position, drop)
+#         if distance < dist_to_drop_off:
+#             dist_to_drop_off = distance
 
-    return dist_to_drop_off
+#     return dist_to_drop_off
 
 
 def closest_dropoff_point(ship):
-    closest_drop = 0
+    if ship.id in cache_drop_offs:
+        return cache_drop_offs[ship.id]
     closest_drop_off = None
     dist_to_drop_off = game_map.height
     for drop in drop_off_points:
-        if game_map.calculate_distance(ship.position, drop) < dist_to_drop_off:
-            dist_to_drop_off = game_map.calculate_distance(
-                ship.position, drop)
+        distance = game_map.calculate_distance(ship.position, drop)
+        if distance < dist_to_drop_off:
+            dist_to_drop_off = distance
             closest_drop_off = drop
-    return closest_drop_off
+    # Cache dropoff distances
+    cache_drop_offs[ship.id] = [dist_to_drop_off, closest_drop_off]
+    return [dist_to_drop_off, closest_drop_off]
 
 
 def check_for_drop(ship):
     if ship_info[ship.id]["state"] == "returning":
         # No need to check.
         return
-    closest_drop = distance_to_closest_drop(ship)
-    closest_drop_off = closest_dropoff_point(ship)
+    #  = closest_dropoff_point(ship)[0]
+    closest_drop, closest_drop_off = closest_dropoff_point(ship)
 
     # Check for end game
     # and ship.percentage_filled > closest_drop:
@@ -235,6 +240,8 @@ def check_for_drop(ship):
 
 
 def create_drop():
+    if game.turn_number <= 100:
+        return
     if me.halite_amount < constants.SHIP_COST:
         return
     if len(drop_off_points) > 2:
@@ -247,7 +254,7 @@ def create_drop():
     best_ship = None
     # we_can_pay = False
     for ship in my_ships:
-        if not ship.id in ship_info:
+        if ship.id not in ship_info:
             continue
         # Don't use ships that are total mining
         if ship_info[ship.id]["total_miner"] == True:
@@ -286,13 +293,12 @@ def create_drop():
             # if cost < me.halite_amount:
             #     we_can_pay = True
 
-    if best_ship and max_ships_found > 2 and max_halite_found >= constants.MAX_HALITE * 5:
+    if best_ship and max_ships_found > 2 \
+            and max_halite_found >= constants.MAX_HALITE * 5:
         cost = 4000 - \
             game_map[best_ship.position].halite_amount - \
             best_ship.halite_amount
         if cost < me.halite_amount:
-            logging.info("In a 10x10 we found {} halite with {} ships. Creating drop point from {} for {}!".format(
-                max_halite_found, max_ships_found, ship, cost))
             me.halite_amount -= cost
             drop_off_points.append(best_ship.position)
             command_queue.append(best_ship.make_dropoff())
@@ -302,7 +308,6 @@ def create_drop():
 
 def closest_valueable_cell(center_pos):
     halite_amount = 0
-    ship_amount = 0
     scan_range = 0
     target = None
     while halite_amount == 0:
@@ -322,6 +327,7 @@ def closest_valueable_cell(center_pos):
 
 
 def determin_target(ship):
+    start_targetting = time.process_time()
     target = None
     # Choose the closest most valueable
     closest = None
@@ -333,7 +339,8 @@ def determin_target(ship):
                     continue
                 closest = distance
                 target = pos
-    if ship_info[ship.id]["target_position"] and ship_info[ship.id]["target_position"] in ship_targets:
+    if ship_info[ship.id]["target_position"] \
+            and ship_info[ship.id]["target_position"] in ship_targets:
         logging.info("Removing old target from ship targets....")
         idx = ship_targets.index(ship_info[ship.id]["target_position"])
         del ship_targets[idx]
@@ -342,6 +349,7 @@ def determin_target(ship):
         logging.info("Targeting closest most valueable...")
         ship_info[ship.id]["target_position"] = target
         ship_targets.append(target)
+        logging.info("targetting time: {}".format(time.process_time() - start_targetting))
     else:
         halite_amount = 0
         ship_amount = 0
@@ -386,6 +394,7 @@ def determin_target(ship):
         ship_targets.append(target)
         ship_info[ship.id]["target_position"] = target
         logging.info("Elected target {} for {}".format(target, ship))
+        logging.info("targetting time: {}".format(time.process_time() - start_targetting))
 
 
 def prevent_bounce_move(ship):
@@ -393,38 +402,41 @@ def prevent_bounce_move(ship):
         determin_target(ship)
 
     if ship not in my_ships:
-
         logging.info("Ordering NON EXISTING ship!! {}".format(ship))
         return
-    # intended_dir = game_map.naive_navigate(ship, ship_info[ship.id]["target_position"], me)
+    # intended_dir = game_map.naive_navigate(ship, ship_info[ship.id]["target_position"])
     intended_dir = game_map.a_star_navigate(
         ship, ship_info[ship.id]["target_position"])
 
     intended_position = ship.position.directional_offset(intended_dir)
     if len(ship_info[ship.id]["previous_pos"]) == 3:
-        if intended_position == ship_info[ship.id]["previous_pos"][1] and ship_info[ship.id]["previous_pos"][0] == ship_info[ship.id]["previous_pos"][2]:
+        if intended_position == ship_info[ship.id]["previous_pos"][1]\
+                and ship_info[ship.id]["previous_pos"][0] == ship_info[ship.id]["previous_pos"][2]:
             logging.warning("Ship is bouncing? {}".format(
                 ship_info[ship.id]["previous_pos"]))
             intended_dir = game_map.naive_navigate(
                 ship, ship_info[ship.id]["target_position"], intended_dir)
             # intended_dir = game_map.a_star_navigate(
             # ship, ship_info[ship.id]["target_position"], intended_position)
-
     return ship.move(intended_dir)
 
 
-def move_ship(ship, force_move=False, stay_near=False):
+def move_ship(ship, force_move=False):
     if ship in ships_moved_this_turn:
         # logging.warning("I already moved this turn!!! {}".format(ship))
         return
     if ship not in my_ships:
         return
 
-    if game.turn_number > constants.MAX_TURNS * 0.97 - distance_to_closest_drop(ship) and ship_info[ship.id]["state"] == "returning":
-        closest_drop_off = closest_dropoff_point(ship)
-        distance = distance_to_closest_drop(ship)
+    end_game = game.turn_number > constants.MAX_TURNS * 0.97\
+        - closest_dropoff_point(ship)[0]
+
+    if end_game:
+        closest_drop_off = closest_dropoff_point(ship)[1]
+        distance = closest_dropoff_point(ship)[0]
         if distance > 1:
-            move = ship.move(game_map.naive_navigate(ship, closest_drop_off))
+            move = ship.move(game_map.naive_navigate(
+                ship, closest_drop_off))
         elif distance == 1:
             direction = game_map.get_unsafe_moves(
                 ship.position, closest_drop_off)[0]
@@ -436,9 +448,7 @@ def move_ship(ship, force_move=False, stay_near=False):
         ships_moved_this_turn.append(ship)
         return
 
-    dropoff_count = len(drop_off_points)
     ship_count = len(my_ships)
-    created_drop_off = False
 
     if ship.id not in ship_info:
         ship_info[ship.id] = {
@@ -457,15 +467,17 @@ def move_ship(ship, force_move=False, stay_near=False):
     if len(ship_info[ship.id]['previous_pos']) > 3:
         del ship_info[ship.id]['previous_pos'][0]
 
-    if ship_info[ship.id]["target_position"] and ship_info[ship.id]["target_position"] == ship.position:
+    if ship_info[ship.id]["target_position"]\
+            and ship_info[ship.id]["target_position"] == ship.position:
         # logging.info("Ship arrived at target.")
         ship_info[ship.id]["target_position"] = None
 
-    if ship_info[ship.id]['total_miner'] and ship_info[ship.id]["state"] != "returning":
-        closest_drop = distance_to_closest_drop(ship)
+    if ship_info[ship.id]['total_miner']\
+            and ship_info[ship.id]["state"] != "returning":
+        closest_drop = closest_dropoff_point(ship)[0]
 
         if ship.percentage_filled >= closest_drop * 10:
-            closest_drop_off = closest_dropoff_point(ship)
+            closest_drop_off = closest_dropoff_point(ship)[1]
             ship_info[ship.id]["state"] = "returning"
             move = ship.move(game_map.naive_navigate(ship, closest_drop_off))
             command_queue.append(move)
@@ -474,8 +486,8 @@ def move_ship(ship, force_move=False, stay_near=False):
 
         # Check for end game
         # and ship.percentage_filled > closest_drop:
-        if ship.halite_amount > 0 and game.turn_number > constants.MAX_TURNS * 0.97 - closest_drop:
-            closest_drop_off = closest_dropoff_point(ship)
+        if end_game:
+            closest_drop_off = closest_dropoff_point(ship)[1]
             # logging.info(
             #     "End game is near, total miner returning {}".format(ship.id))
             ship_info[ship.id]["target_position"] = closest_drop_off
@@ -488,11 +500,7 @@ def move_ship(ship, force_move=False, stay_near=False):
             return
 
         if not ship.is_full:
-            moving_costs = game_map[
-                ship.position].halite_amount / constants.MOVE_COST_RATIO
-            # logging.info("(TM)Moving cost: {} Halite map: {} Halite ship: {}".format(
-            # moving_costs, game_map[ship.position].halite_amount, ship.halite_amount))
-            # if game_map[ship.position].halite_amount > 0:
+            moving_costs = game_map[ship.position].cost
             if moving_costs > 5 or ship.halite_amount < moving_costs:
                 ship_info[ship.id]['state'] = "collecting"
                 game_map[ship.position].ship = ship
@@ -507,11 +515,8 @@ def move_ship(ship, force_move=False, stay_near=False):
                 ships_moved_this_turn.append(ship)
                 return
 
-    moving_costs = game_map[
-        ship.position].halite_amount / constants.MOVE_COST_RATIO
+    moving_costs = game_map[ship.position].cost
     if ship.halite_amount < moving_costs:
-        logging.warning("Can't move ship! It would cost {} and we have {}".format(
-            moving_costs, ship.halite_amount))
         # Can't move even if we wanted to!!
         ship_info[ship.id]["state"] = "collecting"
         command_queue.append(ship.stay_still())
@@ -523,48 +528,44 @@ def move_ship(ship, force_move=False, stay_near=False):
 
     if ship_info[ship.id]["state"] == "returning":
         # check if the ship is back yet
-        if ship.halite_amount == 0 and game.turn_number < constants.MAX_TURNS * 0.95:
+        if ship.halite_amount == 0 and not end_game:
             logging.info(
                 "{} returned, setting to exploring again.".format(ship))
             ship_info[ship.id]["state"] = "exploring"
             ship_info[ship.id]["target_position"] = None
             # logging.info("Dropped off resource: {}".format(ship))
-        elif ship.halite_amount == 0 and game.turn_number >= constants.MAX_TURNS * 0.95:
+        elif ship.halite_amount == 0 and\
+                game.turn_number >= constants.MAX_TURNS * 0.95:
             pass  # stay here
         else:
-            if ship.is_full == False and moving_costs > ship.halite_amount * 0.1:
-                logging.info("It would cost too much halite to move! Cost: {} Max: {}".format(
-                    moving_costs, ship.halite_amount * 0.1))
+            if ship.is_full is False and\
+                    moving_costs > ship.halite_amount * 0.1:
                 command_queue.append(ship.stay_still())
                 ships_moved_this_turn.append(ship)
                 return
             if ship_info[ship.id]["target_position"] is None:
-                logging.error("Ship without target returning? {}".format(ship))
-                logging.error("Ship info: {}".format(ship_info[ship.id]))
                 ship_info[ship.id][
-                    "target_position"] = closest_dropoff_point(ship)
+                    "target_position"] = closest_dropoff_point(ship)[1]
             distance = game_map.calculate_distance(
                 ship.position, ship_info[ship.id]["target_position"])
             # Not dropped off yet, keep moving toward the shipyard
-            # logging.info("Ship returning: {} distance: {}".format(ship, distance))
             global being_sniped
-            if being_sniped and ship_info[ship.id]["target_position"] == me.shipyard.position:
+            target = ship_info[ship.id]["target_position"]
+            if being_sniped and target == me.shipyard.position:
                 if distance < 4:
-                    logging.info("Being sniped, force moving returning ship!")
+                    # logging.info("Being sniped, force moving returning ship!")
                     direction = game_map.get_unsafe_moves(
-                        ship.position, ship_info[ship.id]["target_position"])[0]
+                        ship.position, target)[0]
                     command_queue.append(ship.move(direction))
                     ships_moved_this_turn.append(ship)
                     return
 
             if distance == 1:
                 # Check if there is a ship on the dropoff/shipyard
-                if game_map[ship_info[ship.id]["target_position"]].is_occupied and ship != game_map[ship_info[ship.id]["target_position"]].ship:
+                if game_map[target].is_occupied and ship != game_map[target].ship:
                     if being_sniped:
-                        logging.info(
-                            "Being sniped, force moving returning ship!")
                         direction = game_map.get_unsafe_moves(
-                            ship.position, ship_info[ship.id]["target_position"])[0]
+                            ship.position, target)[0]
                         command_queue.append(ship.move(direction))
                         ships_moved_this_turn.append(ship)
                         being_sniped = False
@@ -576,7 +577,7 @@ def move_ship(ship, force_move=False, stay_near=False):
                     if game.turn_number > constants.MAX_TURNS * 0.95:
                         # Move anyway!!
                         direction = game_map.get_unsafe_moves(
-                            ship.position, ship_info[ship.id]["target_position"])[0]
+                            ship.position, target)[0]
                         command_queue.append(ship.move(direction))
                         ships_moved_this_turn.append(ship)
                         return
@@ -588,8 +589,6 @@ def move_ship(ship, force_move=False, stay_near=False):
 
                     if force_move or occupier in ships_moved_this_turn:
                         # Ship moved there before us, wait out turn
-                        logging.info(
-                            "There is a ship in the way({}), staying still. {}".format(occupier, ship))
                         command_queue.append(ship.stay_still())
                         ships_moved_this_turn.append(ship)
                         return
@@ -605,16 +604,14 @@ def move_ship(ship, force_move=False, stay_near=False):
             return
 
     if ship_info[ship.id]["state"] == "collecting":
-        if game_map.average_halite < 40 and game_map[ship.position].halite_amount > 0 and not ship.is_full:
+        if game_map.average_halite < 40 and\
+                game_map[ship.position].halite_amount > 0 and not ship.is_full:
             logging.info("Map mined out, total mine!")
             ship_info[ship.id]["state"] = "collecting"
             command_queue.append(ship.stay_still())
             ships_moved_this_turn.append(ship)
             return
 
-        # if ship.halite_amount > moving_costs and moving_costs < ship.halite_amount / 5:
-        #     # logging.info("We can move from here! Amount in ship: {} Amount left: {}".format(ship.halite_amount, game_map[ship.position].halite_amount))
-        #     ship_info[ship.id]["state"] = "exploring"
         if game.turn_number <= 30:
             if not ship.is_full_enough and moving_costs > 3:
                 # Stay collecting
@@ -625,14 +622,14 @@ def move_ship(ship, force_move=False, stay_near=False):
             elif game_map[ship.position].halite_amount == 0:
                 ship_info[ship.id]["state"] = "returning"
                 ship_info[ship.id][
-                    "target_position"] = closest_dropoff_point(ship)
+                    "target_position"] = closest_dropoff_point(ship)[1]
                 command_queue.append(prevent_bounce_move(ship))
                 ships_moved_this_turn.append(ship)
                 return
 
         # and game.turn_number <= 50:
-        if distance_to_closest_drop(ship) < 10 and ship_count < 5:
-            if game_map[ship.position].halite_amount > (constants.MAX_HALITE - 100 * distance_to_closest_drop(ship)) and not ship.is_full:
+        if closest_dropoff_point(ship)[0] < 10 and ship_count < 5:
+            if game_map[ship.position].halite_amount > (constants.MAX_HALITE - 100 * closest_dropoff_point(ship)[0]) and not ship.is_full:
                 # Stay collecting
                 ship_info[ship.id]["state"] = "collecting"
                 command_queue.append(ship.stay_still())
@@ -641,12 +638,12 @@ def move_ship(ship, force_move=False, stay_near=False):
             elif ship.is_full_enough:
                 ship_info[ship.id]["state"] = "returning"
                 ship_info[ship.id][
-                    "target_position"] = closest_dropoff_point(ship)
+                    "target_position"] = closest_dropoff_point(ship)[1]
                 command_queue.append(prevent_bounce_move(ship))
                 ships_moved_this_turn.append(ship)
                 return
 
-        if distance_to_closest_drop(ship) > 10 and not ship.is_full_enough and moving_costs > 5:
+        if closest_dropoff_point(ship)[0] > 10 and not ship.is_full_enough and moving_costs > 5:
             # Stay collecting
             ship_info[ship.id]["state"] = "collecting"
             command_queue.append(ship.stay_still())
@@ -688,9 +685,9 @@ def move_ship(ship, force_move=False, stay_near=False):
         determin_target(ship)
         logging.info("New target? {}".format(
             ship_info[ship.id]['target_position']))
-    distance = distance_to_closest_drop(ship)
+    distance = closest_dropoff_point(ship)[0]
     if ship_info[ship.id]["state"] == "exploring" and distance <= 2 and ship.halite_amount > 100:
-        closest_drop_off = closest_dropoff_point(ship)
+        closest_drop_off = closest_dropoff_point(ship)[1]
         if game_map[closest_drop_off].is_occupied and distance == 1:
             move = ship.stay_still()
         else:
@@ -742,11 +739,7 @@ def check_cache_most_valueable():
         del most_valueable_cells_cache[pos]
 
 
-def determin_most_valueable():
-    if game.turn_number > constants.MAX_TURNS * 0.9:
-        return list(most_valueable_cells_cache.keys())
-    most_valueable_cells = []
-    # most_values = []
+def scan_drop_of_values():
     highest_amount_found = 100
     scan_range = 10
 
@@ -754,14 +747,6 @@ def determin_most_valueable():
         highest_amount_found = 20
         scan_range = 5
     ship_count = len(my_ships)
-
-    check_cache_most_valueable()
-    cache_keys = len(most_valueable_cells_cache.keys())
-    if cache_keys > 0:
-        cells = sorted(most_valueable_cells_cache, key=lambda c: most_valueable_cells_cache[
-                       c]['halite_amount'], reverse=True)
-        return cells  # list(most_valueable_cells_cache.keys())
-
     for center_pos in drop_off_points:
         for x in range(-scan_range, scan_range):
             for y in range(-scan_range, scan_range):
@@ -793,23 +778,25 @@ def determin_most_valueable():
         cache_most_valueable(most_valueable_cells)
         return most_valueable_cells
     # highest_amount_found = 0
+
+def determin_most_valueable():
+    if game.turn_number > constants.MAX_TURNS * 0.9:
+        return list(most_valueable_cells_cache.keys())
+    most_valueable_cells = []
+    # most_values = []
+    check_cache_most_valueable()
+    cache_keys = len(most_valueable_cells_cache.keys())
+    if cache_keys > 0:
+        cells = sorted(most_valueable_cells_cache, key=lambda c: most_valueable_cells_cache[
+                       c]['halite_amount'], reverse=True)
+        return cells  # list(most_valueable_cells_cache.keys())
+
     logging.info("Scanning map for valueable fields...")
     # Find the highest amounts of halite on the map
-    for x in range(game_map.height):
-        for y in range(game_map.width):
-            # Check the mapcells
-            current_amount = game_map[Position(x, y)].halite_amount
-            if game_map[Position(x, y)].is_occupied:
-                continue
-            if current_amount >= highest_amount_found:
-                if ship_count > 2 and len(most_valueable_cells) > ship_count - 2:
-                    del most_valueable_cells[0]
-                    # del most_values[0]
-                most_valueable_cells.append(Position(x, y))
-                # most_values.append(current_amount)
-                highest_amount_found = current_amount
+    most_valueable_cells = game_map.most_valueable_cells()
+    logging.info("Highest amount found: {}".format(most_valueable_cells[0].halite_amount))
+    most_valueable_cells = list(map(lambda c: c.position, most_valueable_cells))
 
-    logging.info("Highest amount found: {}".format(highest_amount_found))
     cache_most_valueable(most_valueable_cells)
     return most_valueable_cells
 
@@ -826,6 +813,7 @@ while True:
     logging.info("Ship count: {} Halite: {} Map (tot/avg): {}/{}".format(
         len(my_ships), me.halite_amount, game_map.total_halite, game_map.average_halite))
     ship_targets = []
+    cache_drop_offs = {}
     # Determin the place of enemy ships
     for player in opponents:
         for ship in player.get_ships():
@@ -874,7 +862,7 @@ while True:
             ship_info[ship.id] = {
                 'state': "exploring",
                 'target_position': None,
-                'total_miner': True if ship_count % 2 == 0 else False,
+                'total_miner': ship_count % 2 == 0,
                 'sniper': False,
                 'previous_pos': []
             }
@@ -887,13 +875,17 @@ while True:
     determin_sniper()
 
     snipers = [me.get_ship(k)
-               for (k, v) in ship_info.items() if v['sniper'] == True]
-    returning = sorted([me.get_ship(k) for (k, v) in ship_info.items() if v[
-                       'state'] == 'returning'], key=lambda k: k.halite_amount, reverse=True)
-    collecting = sorted([me.get_ship(k) for (k, v) in ship_info.items() if v[
-                        'state'] == 'collecting'], key=lambda k: k.halite_amount, reverse=True)
-    exploring = sorted([me.get_ship(k) for (k, v) in ship_info.items() if v[
-                        'state'] == 'exploring'], key=lambda k: k.halite_amount, reverse=True)
+               for (k, v) in ship_info.items() if v['sniper']]
+    returning = np.array([me.get_ship(k) for (k, v) in ship_info.items() if v[
+                       'state'] == 'returning'])
+    returning = sorted(returning, key=lambda k: k.halite_amount, reverse=True)
+    logging.info("returning: {}".format(returning))
+    collecting = np.array([me.get_ship(k) for (k, v) in ship_info.items() if v[
+                        'state'] == 'collecting'])
+    collecting = sorted(collecting, key=lambda k: k.halite_amount, reverse=True)
+    exploring = np.array([me.get_ship(k) for (k, v) in ship_info.items() if v[
+                        'state'] == 'exploring'])
+    exploring = sorted(exploring, key=lambda k: k.halite_amount, reverse=True)
 
     # logging.info("Retuning ships: {}".format(returning))
 

@@ -5,6 +5,7 @@ from .entity import Entity, Shipyard, Ship, Dropoff
 from .player import Player
 from .positionals import Direction, Position
 from .common import read_input
+import numpy as np
 import logging
 import random
 import heapq
@@ -36,7 +37,7 @@ class MapCell:
         self._cost = halite_amount / constants.MOVE_COST_RATIO
 
     def update_cost(self):
-        self._cost = self.halite_amount / constants.MOVE_COST_RATIO        
+        self._cost = self.halite_amount / constants.MOVE_COST_RATIO
 
     @property
     def cost(self):
@@ -119,9 +120,9 @@ class GameMap:
     @property
     def total_halite(self):
         if not self._total:
+            cells = np.array(self._cells).flatten()
             tot = 0
-            for col in self._cells:
-                tot += sum(c.halite_amount for c in col)
+            tot += sum(c.halite_amount for c in cells)
             self._total = tot
         return self._total
 
@@ -130,6 +131,11 @@ class GameMap:
         if not self._average:
             self._average = self.total_halite / (self.width * self.height)
         return self._average
+
+    def most_valueable_cells(self):
+        all_cells = np.array(self._cells).flatten()
+        return sorted(all_cells, key=lambda c: c.halite_amount, reverse=True)[:10]
+
 
     def calculate_distance(self, source, target):
         """
@@ -260,23 +266,23 @@ class GameMap:
         return Direction.Still
 
     def heuristic(self, a, b):
-        (x1, y1) = a.x, a.y
-        (x2, y2) = b.x, b.y
+        return self.calculate_distance(a, b)
+        # (x1, y1) = a.x, a.y
+        # (x2, y2) = b.x, b.y
 
-        return abs(x1 - x2) + abs(y1 - y2)
+        # return abs(x1 - x2) + abs(y1 - y2)
 
     def a_star_navigate(self, ship, goal, blocked_position=None):
         start = ship.position
-        
         if blocked_position:
             exclude_dir = ship.position.directional(blocked_position)
         else:
             exclude_dir = None
 
-        # if self.calculate_distance(start, goal) > 5:
-        #     # Too far away to calc with this
-        #     return self.naive_navigate(ship, goal, exclude_dir)
-
+        if self.calculate_distance(start, goal) > 5:
+            # Too far away to calc with this
+            return self.naive_navigate(ship, goal, exclude_dir)
+        logging.debug("Distance astar: {}".format(self.calculate_distance(start, goal)))
         frontier = PriorityQueue()
         frontier.put(start, 0)
         came_from = {}
@@ -288,16 +294,17 @@ class GameMap:
             current = frontier.get()
 
             if current == goal:
-                path = []
+                # path = []
+                pos = None
                 while current != start:
-                    path.append(current)
+                    # path.append(current)
+                    pos = current
                     current = came_from[current]
-                path.append(start)
-                path.reverse()
-                if len(path) > 1:
-                    self[path[1]].mark_unsafe(ship)
-
-                    return ship.position.directional(path[1])
+                # path.append(start)
+                # path.reverse()
+                if pos:
+                    self[pos].mark_unsafe(ship)
+                    return ship.position.directional(pos)
                 else:
                     return Direction.Still
 
@@ -308,14 +315,13 @@ class GameMap:
                 # if next in intended_moves:
                 #     continue
                 if self[next].ship is not None:
-                    # logging.info("Ship detected: {}".format(self[next].ship.id))
                     if ship != self[next].ship:
                         continue
 
                 new_cost = cost_so_far[current] + self[next].cost
                 if next not in cost_so_far or new_cost < cost_so_far[next]:
                     cost_so_far[next] = new_cost
-                    priority = new_cost + self.calculate_distance(goal, next)
+                    priority = new_cost + self.heuristic(goal, next)
                     frontier.put(next, priority)
                     came_from[next] = current
 
